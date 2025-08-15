@@ -1,0 +1,114 @@
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
+from datasets import Dataset
+from collections import Counter
+import torch, re, random, numpy as np
+import pandas as pd
+from pathlib import Path
+import json
+
+# Excel dosyasını oku 
+df = pd.read_excel("s_veri_seti.xlsx")
+
+# Gerekli sütunları seç ve yeniden adlandır
+out_df = df[["Metin", "Label"]].rename(columns={"Metin": "sentence", "Label": "label"})
+
+# Label'ı int tipine çevir
+out_df["label"] = out_df["label"].astype(int)
+
+# Liste/dict formatına dönüştür
+veriler = out_df.to_dict(orient="records")
+
+# 4) Tokenizer ve Dataset
+model_name = "dbmdz/bert-base-turkish-cased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# HuggingFace Dataset: text ve labels isimleri
+df = df.rename(columns={"Metin": "text", "Label": "labels"})
+dataset = Dataset.from_pandas(df, preserve_index=False)
+
+def tok_fn(batch):
+    out = tokenizer(batch["text"], padding="max_length", truncation=True, max_length=64)
+    out["labels"] = batch["labels"]
+    return out
+
+tokenized = dataset.map(tok_fn, batched=True)
+cols = [c for c in ["input_ids", "attention_mask", "token_type_ids", "labels"] if c in tokenized.features]
+tokenized.set_format(type="torch", columns=cols)
+
+# 5) Model ve eğitim
+id2label = {0: "0", 1: "1"}  # istersen anlam isimleri yaz
+label2id = {"0": 0, "1": 1}
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    model_name, num_labels=2, id2label=id2label, label2id=label2id
+)
+
+training_args = TrainingArguments(
+    output_dir="./bert-egitim",
+    num_train_epochs=5,
+    per_device_train_batch_size=8,
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    logging_dir="./logs",
+    logging_steps=5,
+    save_strategy="no",
+    remove_unused_columns=False,
+    report_to="none"
+)
+
+trainer = Trainer(model=model, args=training_args, train_dataset=tokenized)
+trainer.train()
+model.eval()
+
+# 6) Analiz fonksiyonları
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+def vurgula_bir_kelime(cumle, kelime):
+    patt = re.compile(rf"\b{re.escape(kelime)}\b", flags=re.IGNORECASE)
+    return patt.sub(lambda m: f"[{m.group(0)}]", cumle)
+
+@torch.inference_mode()
+def cumle_skorla(cumle):
+    enc = tokenizer(cumle, return_tensors="pt", padding="max_length", truncation=True, max_length=64).to(device)
+    logits = model(**enc).logits
+    return int(logits.argmax(dim=1).item())
+
+def analiz_et(metin):
+    metin_temiz = re.sub(r"[.,!?;:\-\"“”’'()]", " ", metin.lower())
+    kelimeler = [w for w in metin_temiz.split() if w.strip()]
+    sayac = Counter(kelimeler)
+    toplam = len(kelimeler)
+    print(f"\n🧠 Toplam kelime sayısı: {toplam}")
+    print("Kelime\t\tSıklık\t\tOran (%)\t\tTahmin")
+    for kelime, adet in sayac.items():
+        giris = vurgula_bir_kelime(metin, kelime)
+        tahmin = cumle_skorla(giris)
+        oran = (adet / toplam) * 100 if toplam else 0.0
+        print(f"{kelime}\t\t{adet}\t\t{oran:.2f}\t\t{id2label[tahmin]}")
+
+# 7) Örnek kullanım
+"""if _name_ == "_main_":
+    try:
+        metin = input("\n🔍 Analiz etmek istediğiniz metni girin:\n")
+    except EOFError:
+        metin = "Bugün eve gittim ve kitap aldım."
+    analiz_et(metin)"""
+
+# 7) Sürekli analiz döngüsü
+if __name__ == "__main__":
+    print("\n🧠 Metin analiz sistemine hoş geldiniz!")
+    print("Çıkmak için 'çık' yazabilirsiniz.\n")
+    
+    while True:
+        try:
+            metin = input("🔍 Analiz etmek istediğiniz metni girin:\n")
+        except EOFError:
+            print("\n⛔ Girdi alınamadı. Program sonlandırılıyor.")
+            break
+
+        if metin.strip().lower() == "çık":
+            print("\n👋 Görüşmek üzere!")
+            break
+
+        analiz_et(metin)

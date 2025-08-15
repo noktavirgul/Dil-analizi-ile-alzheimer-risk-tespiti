@@ -1,4 +1,4 @@
-### README.md
+
 
 # 🧠 Alzheimer Risk Tahmini ve Bilişsel Dil Analizi Uygulaması
 
